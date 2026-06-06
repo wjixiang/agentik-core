@@ -2,14 +2,13 @@
 
 Domain-agnostic agent runtime. Plug in any `AgentContext` to specialize.
 
-## Crates in this workspace
+## Sibling submodules
 
-| Crate | Role |
-|-------|------|
-| `types` | Shared type definitions (LLM API surface, message types) |
-| `llm_api` | LLM provider SDKs (Anthropic, Mimo, etc.) |
-| `tools` | Tool execution infrastructure (registration, dispatch, retry) |
-| `agentik-core` | The agent runtime — `Agent`, `AgentBuilder`, `AgentContext` trait |
+This crate is published as a single package. Its sibling submodules
+provide shared infrastructure and are pulled in via git:
+
+- `agentik-types` — Shared type definitions (LLM API surface, message types)
+- `agentik-sdk` — LLM provider SDKs (Anthropic, Mimo, etc.)
 
 ## Extension points
 
@@ -48,9 +47,3 @@ let agent = Agent::builder()
     .build()
     .await?;
 ```
-
-## Local development
-
-The `tools` crate has an optional `kms` feature that pulls in the
-dendrite repo (sibling checkout) via path. In a published release,
-this becomes a git tag dep.
