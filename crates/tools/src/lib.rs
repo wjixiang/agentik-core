@@ -5,12 +5,6 @@ pub mod function;
 pub mod registry;
 pub mod toolset;
 
-#[cfg(feature = "kms")]
-pub mod kms_tools;
-
-#[cfg(feature = "kms")]
-pub mod registrations;
-
 pub use error::{ToolError, ToolOperationResult};
 pub use executor::{ToolExecutionConfig, ToolExecutionConfigBuilder, ToolExecutor};
 pub use function::{SimpleTool, ToolFunction};
