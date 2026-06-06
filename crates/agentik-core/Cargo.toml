@@ -1,0 +1,24 @@
+[package]
+name = "agentik-core"
+version = "0.1.0"
+edition = "2024"
+description = "Domain-agnostic agent runtime. Plug in any AgentContext to specialize."
+
+[dependencies]
+tokio = { workspace = true, features = ["sync"] }
+uuid = { version = "1.12", features = ["v4"] }
+llm_api = { path = "../llm_api" }
+types = { path = "../types" }
+tools = { path = "../tools" }
+async-trait.workspace = true
+futures.workspace = true
+thiserror.workspace = true
+tracing = { workspace = true }
+serde.workspace = true
+serde_json.workspace = true
+rusqlite = { version = "0.39.0", features = ["bundled"] }
+regex = "1"
+
+[dev-dependencies]
+dotenvy.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
