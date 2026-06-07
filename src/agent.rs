@@ -303,18 +303,17 @@ impl Agent {
         let has_mutation = toolcalls
             .iter()
             .any(|tc| self.ctx.is_mutation_tool(&tc.name));
-        if has_mutation {
-            if let Ok(issues) = self.ctx.on_mutation_diagnostics().await {
-                if issues.len() != self.last_diagnostic_count {
-                    self.last_diagnostic_count = issues.len();
-                    if !issues.is_empty() {
-                        self.memory
-                            .remember(Message::user(format_diagnostics(&issues)))?;
-                    } else {
-                        self.memory
-                            .remember(Message::user(String::from("诊断刷新：所有问题已修复。")))?;
-                    }
-                }
+        if has_mutation
+            && let Ok(issues) = self.ctx.on_mutation_diagnostics().await
+            && issues.len() != self.last_diagnostic_count
+        {
+            self.last_diagnostic_count = issues.len();
+            if !issues.is_empty() {
+                self.memory
+                    .remember(Message::user(format_diagnostics(&issues)))?;
+            } else {
+                self.memory
+                    .remember(Message::user(String::from("诊断刷新：所有问题已修复。")))?;
             }
         }
 
@@ -407,6 +406,7 @@ impl Agent {
                 self.send_event(agent_event);
             }
         }
+        self.send_event(AgentEvent::Done);
 
         let response = stream.final_message().await?;
 
