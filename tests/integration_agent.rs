@@ -1,0 +1,206 @@
+/// Minimal smoke test — verifies the SDK can parse a mimo SSE stream at all.
+/// Run: MIMO_API_KEY=sk-xxx cargo test -p agentik-core --test integration_agent smoke -- --nocapture
+#[tokio::test]
+async fn test_sdk_mimo_stream_smoke() {
+    use agentik_types::messages::{MessageCreateBuilder, Role};
+    use agentik_types::MessageContent;
+    use agentik_sdk::provider::mimo::{MimoEndpoint, TokenPlanRegion, MODEL_MIMO_V2_5};
+    use futures::StreamExt;
+    use agentik_sdk::client::Anthropic;
+    use agentik_sdk::config::ClientConfig;
+
+    let api_key = std::env::var("MIMO_API_KEY").expect("MIMO_API_KEY not set");
+    let endpoint = MimoEndpoint::TokenPlan(TokenPlanRegion::China);
+
+    let config = ClientConfig {
+        api_key,
+        base_url: endpoint.base_url().to_string(),
+        ..ClientConfig::new("dummy")
+    };
+    let client = Anthropic::with_config(config).expect("client");
+
+    let params = MessageCreateBuilder::new(MODEL_MIMO_V2_5, 128)
+        .message(Role::User, MessageContent::Text("Say hi".into()))
+        .stream(true)
+        .build();
+
+    println!("sending stream request...");
+    let mut stream = client.messages().create_stream(params).await.expect("create_stream failed");
+
+    let mut count = 0u32;
+    while let Some(result) = stream.next().await {
+        println!("  event: {:?}", result);
+        count += 1;
+    }
+
+    let final_msg = stream.final_message().await.expect("final_message failed");
+    println!("\ntotal events: {count}");
+    println!("final message: {:?}", final_msg.content);
+    assert!(count > 0, "expected at least one SSE event");
+}
+
+/// Integration test — calls the real Mimo streaming API.
+///
+/// Run with:
+///   MIMO_API_KEY=sk-xxx cargo test -p agentik-core --test integration_agent -- --nocapture
+///
+/// Requires:
+///   - `MIMO_API_KEY` env var
+///   - Optionally `MIMO_ENDPOINT` (api | china | eur | sgp, default: china)
+use std::sync::Arc;
+
+use agentik_core::{
+    agent::{Agent, AgentConfig},
+    context::{AgentContext, ContextDiagnostic, ContextSnapshot},
+};
+use agentik_sdk::provider::LlmProvider;
+use agentik_sdk::provider::mimo::{
+    MODEL_MIMO_V2_FLASH, MimoEndpoint, MimoProvider, TokenPlanRegion,
+};
+use agentik_sdk::{model::model_pool::ModelPool, provider::mimo::MODEL_MIMO_V2_5};
+use agentik_types::AgentEvent;
+
+// ── Minimal AgentContext ─────────────────────────────────────
+
+struct EchoCtx {
+    prompt: String,
+}
+
+#[async_trait::async_trait]
+impl AgentContext for EchoCtx {
+    async fn on_startup_location(&self) -> Result<Option<String>, String> {
+        Ok(Some(self.prompt.clone()))
+    }
+
+    async fn on_startup_diagnostics(&self) -> Result<Vec<ContextDiagnostic>, String> {
+        Ok(vec![])
+    }
+
+    async fn take_snapshot(&self) -> Result<ContextSnapshot, String> {
+        Ok(ContextSnapshot::new(uuid::Uuid::nil()))
+    }
+
+    fn is_mutation_tool(&self, _name: &str) -> bool {
+        false
+    }
+
+    async fn on_mutation_diagnostics(&self) -> Result<Vec<ContextDiagnostic>, String> {
+        Ok(vec![])
+    }
+
+    async fn on_snapshot_change(
+        &self,
+        _before: &ContextSnapshot,
+        _after: &ContextSnapshot,
+    ) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+
+    fn system_prompt_section(&self) -> String {
+        "You are a helpful assistant. Keep responses very short (one sentence).".into()
+    }
+
+    fn tool_registrations(&self) -> Vec<agentik_core::toolset::ToolRegistration> {
+        vec![]
+    }
+}
+
+// ── Helper ────────────────────────────────────────────────────
+
+fn parse_endpoint(s: &str) -> MimoEndpoint {
+    match s {
+        "api" => MimoEndpoint::Api,
+        "eur" => MimoEndpoint::TokenPlan(TokenPlanRegion::Eur),
+        "sgp" => MimoEndpoint::TokenPlan(TokenPlanRegion::Sgp),
+        _ => MimoEndpoint::TokenPlan(TokenPlanRegion::China),
+    }
+}
+
+fn build_mimo_model_pool() -> ModelPool {
+    let api_key = std::env::var("MIMO_API_KEY").expect("MIMO_API_KEY not set");
+
+    let provider = MimoProvider::new(
+        Some(MimoEndpoint::TokenPlan(TokenPlanRegion::China)),
+        api_key,
+    );
+    let model = provider
+        .get_model(MODEL_MIMO_V2_5)
+        .expect("failed to get mimo model");
+
+    let mut pool = ModelPool::new();
+    pool.add_model(model);
+    pool
+}
+
+// ── Test ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_agent_basic_workflow_with_mimo() {
+    // Arrange
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+
+    let mut agent = Agent::builder()
+        .with_model_pool(Arc::new(build_mimo_model_pool()))
+        .with_context(Arc::new(EchoCtx {
+            prompt: "Say exactly: hello world".into(),
+        }))
+        .with_config(AgentConfig {
+            max_iterations: 3,
+            max_retries: 1,
+        })
+        .build()
+        .await
+        .expect("failed to build agent");
+
+    agent.event_tx = Some(tx);
+
+    // Act — run agent in background, collect events
+    let handle = tokio::spawn(async move {
+        let _ = agent.start().await;
+    });
+
+    // Collect events with a timeout
+    let events = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        let mut evts = vec![];
+        while let Some(e) = rx.recv().await {
+            let is_terminal = matches!(e, AgentEvent::Done | AgentEvent::Error(_));
+            evts.push(e);
+            if is_terminal {
+                break;
+            }
+        }
+        evts
+    })
+    .await
+    .expect("test timed out waiting for agent events");
+
+    let _ = handle.await;
+
+    // Print all events for manual inspection
+    println!("\n=== Events received ({}) ===", events.len());
+    for (i, e) in events.iter().enumerate() {
+        println!("  [{i:2}] {e:?}");
+    }
+
+    // Assert
+    assert!(
+        events.iter().any(|e| matches!(e, AgentEvent::Done)),
+        "Expected Done event, got: {:?}",
+        events
+            .iter()
+            .map(|e| format!("{:?}", e))
+            .collect::<Vec<_>>()
+    );
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::LlmResponse(_))),
+        "Expected at least one LlmResponse event"
+    );
+
+    assert!(
+        !events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+        "Unexpected Error event"
+    );
+}

@@ -142,11 +142,14 @@ impl Agent {
 
     pub async fn start(&mut self) -> Result<(), AgentError> {
         self.lifecycle.set_running();
+        eprintln!("[AGENT-DBG] start() entered");
         self.send_event(agentik_types::AgentUiEvent::LlmResponse(
             "🤖 Agent started".to_string(),
         ));
+        eprintln!("[AGENT-DBG] sent Agent started event");
 
         if let Ok(Some(location)) = self.ctx.on_startup_location().await {
+            eprintln!("[AGENT-DBG] on_startup_location returned: {location}");
             self.memory.remember(Message::user(location))?;
         }
 
@@ -162,8 +165,10 @@ impl Agent {
         let mut consecutive_retries = 0;
         let mut retry_feedback: Option<String> = None;
 
+        eprintln!("[AGENT-DBG] entering while loop, max_iterations={}", self.config.max_iterations);
         while self.lifecycle.is_running() && iteration < self.config.max_iterations {
             iteration += 1;
+            eprintln!("[AGENT-DBG] iteration {iteration}");
             match self.agent_workflow(retry_feedback.take()).await {
                 Ok(()) => consecutive_retries = 0,
                 Err(e) if e.is_retryable() && consecutive_retries < self.config.max_retries => {
@@ -376,6 +381,11 @@ impl Agent {
         let span = span!(Level::TRACE, "API Request");
         let _enter = span.enter();
 
+        eprintln!("[AGENT-DBG] request() entered, context has {} messages", context.len());
+        for (i, msg) in context.iter().enumerate() {
+            eprintln!("[AGENT-DBG]   msg[{i}]: role={:?}, content_blocks={}", msg.role, msg.content.len());
+        }
+
         let model = if let Some(name) = &self.current_model_name {
             self.model_pool
                 .get_model_by_name(name)
@@ -385,6 +395,9 @@ impl Agent {
         };
 
         let est_totol_token = self.token_budget.estimate_total_token(context.len() as u64);
+        eprintln!("[AGENT-DBG] est_tokens={est_totol_token}, context_length={}, tools={}",
+            model.model_info.context_length,
+            self.toolset.tools().len());
 
         if est_totol_token * 9 > (model.model_info.context_length * 10) {
             tracing::debug!(
@@ -392,12 +405,16 @@ impl Agent {
                 context_length = model.model_info.context_length,
                 "context pressure detected, compacting"
             );
+            eprintln!("[AGENT-DBG] COMPACTING...");
             self.memory.compact(model.as_ref()).await?;
+            eprintln!("[AGENT-DBG] compaction done");
         }
 
+        eprintln!("[AGENT-DBG] calling model.request_stream()...");
         let mut stream = model
             .request_stream(context, self.toolset.tools().as_ref())
             .await?;
+        eprintln!("[AGENT-DBG] request_stream() returned, consuming events...");
 
         while let Some(event) = stream.next().await {
             let Ok(stream_event) = event else { continue };
@@ -406,6 +423,7 @@ impl Agent {
                 self.send_event(agent_event);
             }
         }
+        eprintln!("[AGENT-DBG] stream events consumed, calling final_message()...");
         // NB: do NOT emit `AgentEvent::Done` here. `Done` is a
         // lifecycle signal that the TUI uses to flip its `agent_running`
         // flag and re-enable the input field. Emitting it after every
@@ -420,6 +438,7 @@ impl Agent {
         // `MessageStop`, which returns `None` for the same reason.)
 
         let response = stream.final_message().await?;
+        eprintln!("[AGENT-DBG] final_message() returned: {} content blocks", response.content.len());
 
         tracing::debug!(?response, "LLM response");
 
@@ -468,5 +487,139 @@ impl TokenBudget {
 
     pub fn estimate_total_token(&self, system_prompt_token: u64) -> u64 {
         self.append_tokens + self.latest_usage + system_prompt_token
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::{AgentContext, ContextDiagnostic, ContextSnapshot};
+    use crate::testing::dummy_model_info;
+    use agentik_sdk::model::Model;
+    use agentik_sdk::model::model_info::ModelInfo;
+    use agentik_sdk::provider::client::MockApiClient;
+    use agentik_types::AgentEvent;
+    use agentik_types::messages::{ContentBlock, Message, Role};
+    use agentik_types::shared::Usage;
+
+    // ── Mock AgentContext ──────────────────────────────────────
+
+    struct MockCtx;
+
+    #[async_trait::async_trait]
+    impl AgentContext for MockCtx {
+        async fn on_startup_location(&self) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+        async fn on_startup_diagnostics(&self) -> Result<Vec<ContextDiagnostic>, String> {
+            Ok(vec![])
+        }
+        async fn take_snapshot(&self) -> Result<ContextSnapshot, String> {
+            Ok(ContextSnapshot::new(uuid::Uuid::nil()))
+        }
+        fn is_mutation_tool(&self, _: &str) -> bool {
+            false
+        }
+        async fn on_mutation_diagnostics(&self) -> Result<Vec<ContextDiagnostic>, String> {
+            Ok(vec![])
+        }
+        async fn on_snapshot_change(
+            &self,
+            _before: &ContextSnapshot,
+            _after: &ContextSnapshot,
+        ) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+        fn system_prompt_section(&self) -> String {
+            String::new()
+        }
+        fn tool_registrations(&self) -> Vec<ToolRegistration> {
+            vec![]
+        }
+    }
+
+    // ── Helpers ────────────────────────────────────────────────
+
+    fn test_model_info() -> ModelInfo {
+        dummy_model_info("test-model")
+    }
+
+    fn test_final_message(text: &str) -> Message {
+        Message {
+            id: "msg_test".into(),
+            type_: "message".into(),
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text { text: text.into() }],
+            model: Some("test-model".into()),
+            stop_reason: None,
+            stop_sequence: None,
+            usage: Some(Usage {
+                input_tokens: 10,
+                output_tokens: 20,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                server_tool_use: None,
+                service_tier: None,
+            }),
+            request_id: None,
+        }
+    }
+
+    /// Build a minimal agent with an event receiver wired up.
+    async fn build_test_agent(
+        mock_api: MockApiClient,
+    ) -> (Agent, tokio::sync::mpsc::UnboundedReceiver<AgentEvent>) {
+        let mut model_pool = ModelPool::new();
+        model_pool.add_model(Model::new(test_model_info(), mock_api));
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let mut agent = Agent::builder()
+            .with_model_pool(Arc::new(model_pool))
+            .with_context(Arc::new(MockCtx))
+            .with_config(AgentConfig {
+                max_iterations: 5,
+                max_retries: 0,
+            })
+            .build()
+            .await
+            .unwrap();
+
+        agent.event_tx = Some(tx);
+        (agent, rx)
+    }
+
+    /// Collect all events from the receiver until channel closes or timeout.
+    async fn collect_events(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<AgentEvent>,
+    ) -> Vec<AgentEvent> {
+        let mut events = vec![];
+        while let Some(e) = rx.recv().await {
+            events.push(e);
+        }
+        events
+    }
+
+    // ── Tests ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_events_received_on_simple_text_response() {
+        // TODO: 配置 MockApiClient.expect_request_stream() 返回
+        // MessageStream::from_events(vec![...], test_final_message("hello"))
+        //
+        let mut mock = MockApiClient::new();
+        // mock.expect_request_stream()
+        //     .returning(|_, _, _| { /* 返回 mock stream */ });
+
+        let (mut agent, mut rx) = build_test_agent(mock).await;
+
+        tokio::spawn(async move {
+            let _ = agent.start().await;
+        });
+
+        let events = collect_events(&mut rx).await;
+
+        // 验证事件序列包含：
+        // LlmResponse("🤖 Agent started") → Requesting → TextDelta → ... → LlmResponse("hello") → Done
     }
 }
