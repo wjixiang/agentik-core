@@ -32,6 +32,7 @@ use crate::{
     toolset::{ToolRegistration, Toolset},
 };
 
+#[derive(Clone)]
 pub struct AgentConfig {
     pub max_iterations: usize,
     pub max_retries: usize,

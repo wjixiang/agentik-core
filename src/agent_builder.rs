@@ -9,6 +9,7 @@ use crate::error::AgentError;
 use crate::storage::AgentSnapshotStorage;
 use crate::{lifecycle::AgentLifecycle, memory::Memory, toolset::Toolset};
 
+#[derive(Clone)]
 pub struct AgentBuilder {
     model_pool: Option<Arc<ModelPool>>,
     ctx: Option<Arc<dyn AgentContext>>,
