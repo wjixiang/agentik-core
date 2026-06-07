@@ -1,4 +1,5 @@
 use agentik_sdk::model::Model;
+use agentik_types::errors::AnthropicError;
 use agentik_types::messages::{ContentBlock, Message};
 use crate::message_ext::AgentMessageExt;
 use agentik_types::Tool;
@@ -16,6 +17,9 @@ pub struct Memory {
 pub enum MemoryError {
     #[error("None item inside curruent memory")]
     EmptyMemoryItem,
+
+    #[error("Failed to compact memory: {0}")]
+    Compact(#[from] AnthropicError),
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -81,8 +85,7 @@ impl Memory {
 
         let summary = model
             .request(messages, &Vec::<Tool>::new())
-            .await
-            .unwrap();
+            .await?;
 
         self.add_summary_to_last_item(
             summary
