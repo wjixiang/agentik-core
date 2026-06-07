@@ -17,8 +17,7 @@ impl Retryable for AnthropicError {
     fn is_retryable(&self) -> bool {
         matches!(
             self,
-            Self::BadRequest { .. }
-                | Self::RateLimit { .. }
+            Self::RateLimit { .. }
                 | Self::InternalServer { .. }
                 | Self::Connection { .. }
                 | Self::ConnectionTimeout

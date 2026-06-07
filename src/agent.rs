@@ -9,16 +9,17 @@
 
 use std::{sync::Arc, time::Duration, time::UNIX_EPOCH};
 
-use crate::context::{format_diagnostics, AgentContext, ContextSnapshot};
+use crate::context::{AgentContext, ContextSnapshot, format_diagnostics};
 use crate::message_ext::AgentMessageExt;
 use agentik_sdk::model::model_pool::ModelPool;
-use tracing::{Level, event, span};
 use agentik_types::messages::{ContentBlock, Message, Role};
 use agentik_types::tools::ToolUse;
+use futures::StreamExt;
+use tracing::{Level, event, span};
 use uuid::Uuid;
 
-use agentik_types::ToolCallResponse;
 use agentik_types::ToolCallResponseContent;
+use agentik_types::{AgentEvent, ToolCallResponse};
 
 use crate::prompt::system_prompt_builder;
 use crate::types::ToolEffect;
@@ -299,7 +300,9 @@ impl Agent {
             ))?;
         }
 
-        let has_mutation = toolcalls.iter().any(|tc| self.ctx.is_mutation_tool(&tc.name));
+        let has_mutation = toolcalls
+            .iter()
+            .any(|tc| self.ctx.is_mutation_tool(&tc.name));
         if has_mutation {
             if let Ok(issues) = self.ctx.on_mutation_diagnostics().await {
                 if issues.len() != self.last_diagnostic_count {
@@ -324,7 +327,11 @@ impl Agent {
                 ContextSnapshot::new(Uuid::nil())
             }
         };
-        if let Ok(Some(location)) = self.ctx.on_snapshot_change(&snapshot_before, &snapshot_after).await {
+        if let Ok(Some(location)) = self
+            .ctx
+            .on_snapshot_change(&snapshot_before, &snapshot_after)
+            .await
+        {
             self.memory.remember(Message::user(location))?;
         }
 
@@ -381,13 +388,27 @@ impl Agent {
         let est_totol_token = self.token_budget.estimate_total_token(context.len() as u64);
 
         if est_totol_token * 9 > (model.model_info.context_length * 10) {
-            tracing::debug!(est_tokens = est_totol_token, context_length = model.model_info.context_length, "context pressure detected, compacting");
+            tracing::debug!(
+                est_tokens = est_totol_token,
+                context_length = model.model_info.context_length,
+                "context pressure detected, compacting"
+            );
             self.memory.compact(model.as_ref()).await?;
         }
 
-        let response = model
-            .request(context, self.toolset.tools().as_ref())
+        let mut stream = model
+            .request_stream(context, self.toolset.tools().as_ref())
             .await?;
+
+        while let Some(event) = stream.next().await {
+            let Ok(stream_event) = event else { continue };
+
+            if let Some(agent_event) = AgentEvent::from_stream_event(&stream_event) {
+                self.send_event(agent_event);
+            }
+        }
+
+        let response = stream.final_message().await?;
 
         tracing::debug!(?response, "LLM response");
 

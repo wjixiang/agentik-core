@@ -44,6 +44,7 @@ impl ContextSnapshot {
     }
 }
 
+/// Agent具状态指针抽象接口，其内部实现方法及状态会在每轮请求时自动计算并注入请求上下文
 #[async_trait]
 pub trait AgentContext: Send + Sync {
     async fn on_startup_location(&self) -> Result<Option<String>, String>;
@@ -83,3 +84,4 @@ pub fn format_diagnostics(issues: &[ContextDiagnostic]) -> String {
     }
     lines.join("\n")
 }
+
