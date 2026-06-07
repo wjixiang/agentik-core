@@ -58,9 +58,6 @@ pub enum AgentError {
     #[error("Memory error occured")]
     MemoryError(#[from] MemoryError),
 
-    #[error("Agent did not use any tools")]
-    NoneToolUse,
-
     #[error("Unknown tool requested:  {0:?}. Existed tools: {1:?}")]
     UnknownTool(Vec<ToolUse>, Vec<agentik_types::Tool>),
 
@@ -86,7 +83,6 @@ impl Retryable for AgentError {
         match self {
             Self::ApiRequestError(e) => e.is_retryable(),
             Self::Tool(e) => e.is_retryable(),
-            Self::NoneToolUse => true,
             _ => false,
         }
     }
@@ -95,9 +91,6 @@ impl Retryable for AgentError {
         match self {
             Self::ApiRequestError(e) => e.retry_message(),
             Self::Tool(e) => e.retry_message(),
-            Self::NoneToolUse => {
-                "Your previous response did not include any tool calls. You MUST use at least one tool to proceed. Please retry with an appropriate tool call.".to_string()
-            }
             _ => format!("An error occurred: {self}."),
         }
     }

@@ -232,12 +232,20 @@ impl Agent {
 
         self.token_budget.latest_usage = last_usage.input_tokens + last_usage.output_tokens;
 
-        let toolcalls = self.extract_toolcalls(&response_message)?;
+        // Always remember the LLM response so the final text (if any) is preserved
+        // in conversation history before we decide whether to terminate.
+        self.memory.remember(response_message.clone())?;
 
-        self.memory.remember(response_message)?;
+        let toolcalls = self.extract_toolcalls(&response_message);
 
+        // No tool calls in the response means the agent has finished its work.
+        // This aligns with the LLM's trained prior ("produce final text = done"),
+        // removing the retry-loop failure mode where the model never explicitly
+        // calls `attempt_complete`. The lifecycle is flipped to IDLE so the
+        // outer `start()` loop exits.
         if toolcalls.is_empty() {
-            return Err(AgentError::NoneToolUse);
+            self.lifecycle.set_idle();
+            return Ok(());
         }
 
         let snapshot_before = match self.ctx.take_snapshot().await {
@@ -386,8 +394,8 @@ impl Agent {
         Ok(response)
     }
 
-    fn extract_toolcalls(&self, message: &Message) -> Result<Vec<ToolUse>, AgentError> {
-        let toolcalls: Vec<ToolUse> = message
+    fn extract_toolcalls(&self, message: &Message) -> Vec<ToolUse> {
+        message
             .content
             .iter()
             .filter_map(|c| {
@@ -401,12 +409,7 @@ impl Agent {
                     None
                 }
             })
-            .collect();
-        if toolcalls.is_empty() {
-            return Err(AgentError::NoneToolUse);
-        }
-
-        Ok(toolcalls)
+            .collect()
     }
 }
 
