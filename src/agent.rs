@@ -406,7 +406,18 @@ impl Agent {
                 self.send_event(agent_event);
             }
         }
-        self.send_event(AgentEvent::Done);
+        // NB: do NOT emit `AgentEvent::Done` here. `Done` is a
+        // lifecycle signal that the TUI uses to flip its `agent_running`
+        // flag and re-enable the input field. Emitting it after every
+        // LLM response — including the intermediate ones that are
+        // followed by tool calls and another round-trip — caused the
+        // TUI to think the agent had finished mid-iteration, which
+        // collapsed the spinner into the "Enter to type" hint while
+        // tool calls and the next streaming response were still in
+        // flight. The lifecycle-based `Done` at the bottom of
+        // `start()` is the single correct emission point.
+        // (See also `AgentEvent::from_stream_event` for
+        // `MessageStop`, which returns `None` for the same reason.)
 
         let response = stream.final_message().await?;
 
