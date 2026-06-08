@@ -51,7 +51,7 @@ use std::sync::Arc;
 
 use agentik_core::{
     agent::{Agent, AgentConfig},
-    context::{AgentContext, ContextDiagnostic, ContextSnapshot},
+    context::{AgentContext, ContextChanges, InMemoryAgentContext},
 };
 use agentik_sdk::provider::LlmProvider;
 use agentik_sdk::provider::mimo::{
@@ -60,49 +60,21 @@ use agentik_sdk::provider::mimo::{
 use agentik_sdk::{model::model_pool::ModelPool, provider::mimo::MODEL_MIMO_V2_5};
 use agentik_types::AgentEvent;
 
-// ── Minimal AgentContext ─────────────────────────────────────
+// ── Helper: build an InMemoryAgentContext with initial data ──────
 
-struct EchoCtx {
-    prompt: String,
-}
-
-#[async_trait::async_trait]
-impl AgentContext for EchoCtx {
-    async fn on_startup_location(&self) -> Result<Option<String>, String> {
-        Ok(Some(self.prompt.clone()))
-    }
-
-    async fn on_startup_diagnostics(&self) -> Result<Vec<ContextDiagnostic>, String> {
-        Ok(vec![])
-    }
-
-    async fn take_snapshot(&self) -> Result<ContextSnapshot, String> {
-        Ok(ContextSnapshot::new(uuid::Uuid::nil()))
-    }
-
-    fn is_mutation_tool(&self, _name: &str) -> bool {
-        false
-    }
-
-    async fn on_mutation_diagnostics(&self) -> Result<Vec<ContextDiagnostic>, String> {
-        Ok(vec![])
-    }
-
-    async fn on_snapshot_change(
-        &self,
-        _before: &ContextSnapshot,
-        _after: &ContextSnapshot,
-    ) -> Result<Option<String>, String> {
-        Ok(None)
-    }
-
-    fn system_prompt_section(&self) -> String {
-        "You are a helpful assistant. Keep responses very short (one sentence).".into()
-    }
-
-    fn tool_registrations(&self) -> Vec<agentik_core::toolset::ToolRegistration> {
-        vec![]
-    }
+fn build_echo_context(prompt: &str) -> Arc<InMemoryAgentContext> {
+    let ctx = InMemoryAgentContext::new();
+    let mut data = std::collections::HashMap::new();
+    data.insert(
+        "prompt".to_string(),
+        serde_json::Value::String(prompt.to_string()),
+    );
+    // Pre-write so version > 0, triggering injection on first loop
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        ctx.write(ContextChanges { data }).await.unwrap();
+    });
+    Arc::new(ctx)
 }
 
 // ── Helper ────────────────────────────────────────────────────
@@ -141,9 +113,10 @@ async fn test_agent_basic_workflow_with_mimo() {
 
     let mut agent = Agent::builder()
         .with_model_pool(Arc::new(build_mimo_model_pool()))
-        .with_context(Arc::new(EchoCtx {
-            prompt: "Say exactly: hello world".into(),
-        }))
+        .with_context(build_echo_context("Say exactly: hello world"))
+        .with_system_prompt_section(
+            "You are a helpful assistant. Keep responses very short (one sentence).",
+        )
         .with_config(AgentConfig {
             max_iterations: 3,
             max_retries: 1,

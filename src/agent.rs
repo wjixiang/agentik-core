@@ -9,7 +9,7 @@
 
 use std::{sync::Arc, time::Duration, time::UNIX_EPOCH};
 
-use crate::context::{AgentContext, ContextSnapshot, format_diagnostics};
+use crate::context::{AgentContext, serialize_snapshot};
 use crate::message_ext::AgentMessageExt;
 use agentik_sdk::model::model_pool::ModelPool;
 use agentik_types::messages::{ContentBlock, Message, Role};
@@ -57,7 +57,8 @@ pub struct Agent {
     pub(crate) storage: Option<Arc<dyn AgentSnapshotStorage>>,
     pub(crate) token_budget: TokenBudget,
     pub(crate) ctx: Arc<dyn AgentContext>,
-    pub(crate) last_diagnostic_count: usize,
+    pub(crate) last_context_version: u64,
+    pub(crate) system_prompt_section: Option<String>,
     /// Optional event channel for streaming progress to external observers.
     pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<agentik_types::AgentUiEvent>>,
     /// Currently selected model name. If None, falls back to round-robin.
@@ -147,17 +148,8 @@ impl Agent {
             "🤖 Agent started".to_string(),
         ));
 
-        if let Ok(Some(location)) = self.ctx.on_startup_location().await {
-            self.memory.remember(Message::user(location))?;
-        }
-
-        if let Ok(issues) = self.ctx.on_startup_diagnostics().await {
-            self.last_diagnostic_count = issues.len();
-            if !issues.is_empty() {
-                self.memory
-                    .remember(Message::user(format_diagnostics(&issues)))?;
-            }
-        }
+        // Initial context injection
+        self.inject_context_if_changed();
 
         let mut iteration = 0;
         let mut consecutive_retries = 0;
@@ -213,6 +205,9 @@ impl Agent {
                 .unwrap();
         }
 
+        // Context injection at loop boundary (before building context for LLM)
+        self.inject_context_if_changed();
+
         let context = self.build_context().await?;
         self.send_event(agentik_types::AgentUiEvent::Requesting);
         let response_message = self.request(context).await?;
@@ -249,14 +244,6 @@ impl Agent {
             self.lifecycle.set_idle();
             return Ok(());
         }
-
-        let snapshot_before = match self.ctx.take_snapshot().await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("failed to take snapshot before: {}", e);
-                ContextSnapshot::new(Uuid::nil())
-            }
-        };
 
         for tc in &toolcalls {
             self.send_event(agentik_types::AgentUiEvent::ToolCall {
@@ -301,41 +288,26 @@ impl Agent {
             ))?;
         }
 
-        let has_mutation = toolcalls
-            .iter()
-            .any(|tc| self.ctx.is_mutation_tool(&tc.name));
-        if has_mutation
-            && let Ok(issues) = self.ctx.on_mutation_diagnostics().await
-            && issues.len() != self.last_diagnostic_count
-        {
-            self.last_diagnostic_count = issues.len();
-            if !issues.is_empty() {
-                self.memory
-                    .remember(Message::user(format_diagnostics(&issues)))?;
-            } else {
-                self.memory
-                    .remember(Message::user(String::from("诊断刷新：所有问题已修复。")))?;
-            }
-        }
-
         self.handle_effect(&tool_results).await;
 
-        let snapshot_after = match self.ctx.take_snapshot().await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("failed to take snapshot after: {}", e);
-                ContextSnapshot::new(Uuid::nil())
-            }
-        };
-        if let Ok(Some(location)) = self
-            .ctx
-            .on_snapshot_change(&snapshot_before, &snapshot_after)
-            .await
-        {
-            self.memory.remember(Message::user(location))?;
-        }
+        // Context injection after tool execution (captures any writes that happened
+        // during tool execution, e.g. state changes triggered by mutation tools)
+        self.inject_context_if_changed();
 
         Ok(())
+    }
+
+    /// Check the context store for a version change. If detected, serialize
+    /// the snapshot into a User message and append to memory.
+    fn inject_context_if_changed(&mut self) {
+        let snapshot = self.ctx.read();
+        if snapshot.version > self.last_context_version {
+            self.last_context_version = snapshot.version;
+            if !snapshot.data.is_empty() {
+                let msg = serialize_snapshot(&snapshot);
+                let _ = self.memory.remember(Message::user(msg));
+            }
+        }
     }
 
     /// Apply agent-level effects declared by tool results (e.g. lifecycle transitions).
@@ -360,8 +332,14 @@ impl Agent {
 
         let system_prompt = system_prompt_builder::SystemPromptBuilder::default()
             .build_identity()
-            .with_extra_section(self.ctx.system_prompt_section())
             .parse();
+
+        // Append static system prompt section if provided at build time
+        let system_prompt = if let Some(ref extra) = self.system_prompt_section {
+            format!("{}\n{}", system_prompt, extra)
+        } else {
+            system_prompt
+        };
 
         let context_messages = self.memory.render_context()?.to_vec();
 
@@ -475,7 +453,7 @@ impl TokenBudget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::{AgentContext, ContextDiagnostic, ContextSnapshot};
+    use crate::context::{AgentContext, ContextChanges, ContextSnapshot};
     use crate::testing::dummy_model_info;
     use agentik_sdk::model::Model;
     use agentik_sdk::model::model_info::ModelInfo;
@@ -490,33 +468,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AgentContext for MockCtx {
-        async fn on_startup_location(&self) -> Result<Option<String>, String> {
-            Ok(None)
+        fn read(&self) -> ContextSnapshot {
+            ContextSnapshot::default()
         }
-        async fn on_startup_diagnostics(&self) -> Result<Vec<ContextDiagnostic>, String> {
-            Ok(vec![])
-        }
-        async fn take_snapshot(&self) -> Result<ContextSnapshot, String> {
-            Ok(ContextSnapshot::new(uuid::Uuid::nil()))
-        }
-        fn is_mutation_tool(&self, _: &str) -> bool {
-            false
-        }
-        async fn on_mutation_diagnostics(&self) -> Result<Vec<ContextDiagnostic>, String> {
-            Ok(vec![])
-        }
-        async fn on_snapshot_change(
-            &self,
-            _before: &ContextSnapshot,
-            _after: &ContextSnapshot,
-        ) -> Result<Option<String>, String> {
-            Ok(None)
-        }
-        fn system_prompt_section(&self) -> String {
-            String::new()
-        }
-        fn tool_registrations(&self) -> Vec<ToolRegistration> {
-            vec![]
+
+        async fn write(&self, _changes: ContextChanges) -> Result<(), String> {
+            Ok(())
         }
     }
 

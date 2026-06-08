@@ -8,13 +8,28 @@ use crate::context::AgentContext;
 use crate::error::AgentError;
 use crate::storage::AgentSnapshotStorage;
 use crate::{lifecycle::AgentLifecycle, memory::Memory, toolset::Toolset};
+use crate::toolset::ToolRegistration;
 
-#[derive(Clone)]
 pub struct AgentBuilder {
     model_pool: Option<Arc<ModelPool>>,
     ctx: Option<Arc<dyn AgentContext>>,
     config: AgentConfig,
     storage: Option<Arc<dyn AgentSnapshotStorage>>,
+    tools: Vec<ToolRegistration>,
+    system_prompt_section: Option<String>,
+}
+
+impl Clone for AgentBuilder {
+    fn clone(&self) -> Self {
+        Self {
+            model_pool: self.model_pool.clone(),
+            ctx: self.ctx.clone(),
+            config: self.config.clone(),
+            storage: self.storage.clone(),
+            tools: Vec::new(), // ToolRegistration is not Clone; re-register if needed
+            system_prompt_section: self.system_prompt_section.clone(),
+        }
+    }
 }
 
 impl AgentBuilder {
@@ -24,6 +39,8 @@ impl AgentBuilder {
             ctx: None,
             config: AgentConfig::default(),
             storage: None,
+            tools: Vec::new(),
+            system_prompt_section: None,
         }
     }
 
@@ -47,6 +64,18 @@ impl AgentBuilder {
         self
     }
 
+    /// Register additional tools on the agent (beyond the built-in lifecycle tools).
+    pub fn with_tools(mut self, tools: Vec<ToolRegistration>) -> Self {
+        self.tools = tools;
+        self
+    }
+
+    /// Set a static extra section for the system prompt.
+    pub fn with_system_prompt_section(mut self, section: impl Into<String>) -> Self {
+        self.system_prompt_section = Some(section.into());
+        self
+    }
+
     pub async fn build(self) -> Result<Agent, AgentError> {
         let model_pool = self
             .model_pool
@@ -57,7 +86,7 @@ impl AgentBuilder {
 
         let mut toolset = Toolset::default();
         toolset.register_all(crate::tools::lifecycle_registrations())?;
-        toolset.register_all(ctx.tool_registrations())?;
+        toolset.register_all(self.tools)?;
 
         Ok(Agent {
             id: Uuid::new_v4(),
@@ -69,7 +98,8 @@ impl AgentBuilder {
             storage: self.storage,
             token_budget: TokenBudget::default(),
             ctx,
-            last_diagnostic_count: 0,
+            last_context_version: 0,
+            system_prompt_section: self.system_prompt_section,
             event_tx: None,
             current_model_name: None,
         })
