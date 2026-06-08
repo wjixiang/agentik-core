@@ -379,7 +379,13 @@ impl Agent {
             .await?;
 
         while let Some(event) = stream.next().await {
-            let Ok(stream_event) = event else { continue };
+            let stream_event = match event {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!("stream event error: {e}; breaking stream loop");
+                    break;
+                }
+            };
 
             if let Some(agent_event) = AgentEvent::from_stream_event(&stream_event) {
                 self.send_event(agent_event);
