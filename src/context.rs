@@ -37,7 +37,7 @@ pub struct ContextChanges {
 #[async_trait]
 pub trait AgentContext: Send + Sync {
     /// Return a clone of the current context state.
-    fn read(&self) -> ContextSnapshot;
+    async fn read(&self) -> ContextSnapshot;
 
     /// Apply external changes. Implementors should update internal state,
     /// bump the version, and persist if needed.
@@ -74,8 +74,8 @@ impl Default for InMemoryAgentContext {
 
 #[async_trait]
 impl AgentContext for InMemoryAgentContext {
-    fn read(&self) -> ContextSnapshot {
-        self.inner.blocking_read().clone()
+    async fn read(&self) -> ContextSnapshot {
+        self.inner.read().await.clone()
     }
 
     async fn write(&self, changes: ContextChanges) -> Result<(), String> {
@@ -121,47 +121,41 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
-    fn test_in_memory_read_write() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+    #[tokio::test]
+    async fn test_in_memory_read_write() {
         let ctx = InMemoryAgentContext::new();
 
         // Initial read returns version 0, empty data
-        let snap = ctx.read();
+        let snap = ctx.read().await;
         assert_eq!(snap.version, 0);
         assert!(snap.data.is_empty());
 
         // Write some data
-        rt.block_on(async {
-            let mut data = HashMap::new();
-            data.insert("location".to_string(), json!("Beijing"));
-            data.insert("diagnostics".to_string(), json!([]));
-            ctx.write(ContextChanges { data }).await.unwrap();
-        });
+        let mut data = HashMap::new();
+        data.insert("location".to_string(), json!("Beijing"));
+        data.insert("diagnostics".to_string(), json!([]));
+        ctx.write(ContextChanges { data }).await.unwrap();
 
         // Read again — version bumped, data present
-        let snap = ctx.read();
+        let snap = ctx.read().await;
         assert_eq!(snap.version, 1);
         assert_eq!(snap.data.get("location").unwrap(), &json!("Beijing"));
         assert_eq!(snap.data.get("diagnostics").unwrap(), &json!([]));
     }
 
-    #[test]
-    fn test_in_memory_write_accumulates() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+    #[tokio::test]
+    async fn test_in_memory_write_accumulates() {
         let ctx = InMemoryAgentContext::new();
 
-        rt.block_on(async {
-            let mut data = HashMap::new();
-            data.insert("a".to_string(), json!(1));
-            ctx.write(ContextChanges { data }).await.unwrap();
+        let mut data = HashMap::new();
+        data.insert("a".to_string(), json!(1));
+        ctx.write(ContextChanges { data }).await.unwrap();
 
-            let mut data2 = HashMap::new();
-            data2.insert("b".to_string(), json!(2));
-            ctx.write(ContextChanges { data: data2 }).await.unwrap();
-        });
+        let mut data2 = HashMap::new();
+        data2.insert("b".to_string(), json!(2));
+        ctx.write(ContextChanges { data: data2 }).await.unwrap();
 
-        let snap = ctx.read();
+        let snap = ctx.read().await;
         assert_eq!(snap.version, 2);
         assert_eq!(snap.data.get("a").unwrap(), &json!(1));
         assert_eq!(snap.data.get("b").unwrap(), &json!(2));

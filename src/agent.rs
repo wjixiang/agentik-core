@@ -149,7 +149,7 @@ impl Agent {
         ));
 
         // Initial context injection
-        self.inject_context_if_changed();
+        self.inject_context_if_changed().await;
 
         let mut iteration = 0;
         let mut consecutive_retries = 0;
@@ -206,7 +206,7 @@ impl Agent {
         }
 
         // Context injection at loop boundary (before building context for LLM)
-        self.inject_context_if_changed();
+        self.inject_context_if_changed().await;
 
         let context = self.build_context().await?;
         self.send_event(agentik_types::AgentUiEvent::Requesting);
@@ -292,15 +292,15 @@ impl Agent {
 
         // Context injection after tool execution (captures any writes that happened
         // during tool execution, e.g. state changes triggered by mutation tools)
-        self.inject_context_if_changed();
+        self.inject_context_if_changed().await;
 
         Ok(())
     }
 
     /// Check the context store for a version change. If detected, serialize
     /// the snapshot into a User message and append to memory.
-    fn inject_context_if_changed(&mut self) {
-        let snapshot = self.ctx.read();
+    async fn inject_context_if_changed(&mut self) {
+        let snapshot = self.ctx.read().await;
         if snapshot.version > self.last_context_version {
             self.last_context_version = snapshot.version;
             if !snapshot.data.is_empty() {
@@ -474,7 +474,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AgentContext for MockCtx {
-        fn read(&self) -> ContextSnapshot {
+        async fn read(&self) -> ContextSnapshot {
             ContextSnapshot::default()
         }
 
